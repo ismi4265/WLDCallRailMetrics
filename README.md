@@ -20,12 +20,19 @@ A FastAPI application to ingest call data from the [CallRail API](https://apidoc
 
 ## 📂 Project structure
 WLDCallRailMetrics/
+
 ├── app/
+
 │ └── main.py # FastAPI app
+
 ├── requirements.txt
+
 ├── Dockerfile
+
 ├── .github/workflows/ci.yml
+
 ├── .env.example
+
 └── README.md
 
 bash
@@ -38,21 +45,21 @@ bash
    cd WLDCallRailMetrics
 
 2. **Create virtual environment**
-'''bash
+   ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 
 3. **Install dependencies**
-'''bash
+   ```bash
 pip install -r requirements.txt
 
 
 4. **Configure environment**
-'''bash 
+   ```bash
 Copy .env.example → .env and fill in values:
 
 env
-bash''
+   ```bash
 CALLRAIL_API_KEY=your_api_key
 CALLRAIL_ACCOUNT_ID=your_account_id
 DB_PATH=callrail_metrics.db
@@ -65,18 +72,18 @@ DEFAULT_ONLY_TAGS=Existing Patient,New Patient
 
 
 **Local**
-bach''
+   ```bash
 uvicorn app.main:app --reload --port 8000
 App runs at: http://localhost:8000
 
 **Docker**
 Build:
-'''bash
+   ```bash
 docker build -t wld-callrail:dev .
 
 Run with .env:
 
-'''bash
+   ```bash
 docker run --rm -p 8000:8000 --env-file .env wld-callrail:dev
 
 
@@ -86,19 +93,19 @@ A CI workflow is included at .github/workflows/ci.yml.
 ## 🧪 Endpoints
 
 **Health**
-'''bash
+   ```bash
 curl http://localhost:8000/health
 
 **Ingest last week**
-'''bash
+   ```bash
 curl -X POST http://localhost:8000/ingest/last-week
 
 **Metrics summary**
-'''bash
+   ```bash
 curl http://localhost:8000/metrics/summary
 
 **Report: Avg call time last week**
-'''bash
+   ```bash
 curl http://localhost:8000/reports/avg-call-time-last-week
 
 
@@ -115,27 +122,27 @@ EXCLUDE_AGENTS=Taylor
 
 **Include only one agent (per request)**
 
-'''bash
+   ```bash
 curl "http://localhost:8000/reports/avg-call-time-last-week?only_agent=Taylor"
 
 
 **Restrict to tags (per request)**
 Note: Spaces must be URL-encoded as %20.
 
-'''bash
+   ```bash
 curl "http://localhost:8000/reports/avg-call-time-last-week?only_tags=Existing%20Patient,New%20Patient"
 
 
 Or safer with --data-urlencode:
 
-'''bash
+   ```bash
 curl --get "http://localhost:8000/reports/avg-call-time-last-week" \
   --data-urlencode "only_tags=Existing Patient,New Patient"
 
 
 **Combine agent + tags**
 
-'''bash
+   ```bash
 curl --get "http://localhost:8000/reports/avg-call-time-last-week" \
   --data-urlencode "only_agent=Taylor" \
   --data-urlencode "only_tags=Existing Patient,New Patient"
@@ -144,7 +151,7 @@ curl --get "http://localhost:8000/reports/avg-call-time-last-week" \
 ## 🛠 Debugging
 Check what’s in the database:
 
-'''bash
+   ```bash
 curl http://localhost:8000/debug/db-stats
 curl http://localhost:8000/debug/dates
 
