@@ -1,3 +1,4 @@
+import os
 import asyncio
 import datetime as dt
 import sqlite3
@@ -15,13 +16,18 @@ class Settings(BaseSettings):
     CALLRAIL_API_KEY: str
     CALLRAIL_ACCOUNT_ID: str
     DB_PATH: str = "callrail_metrics.db"
-    CORS_ORIGINS: str = "*"         # comma-separated list or "*" for all
-    EXCLUDE_AGENTS: str = ""        # comma-separated names to exclude by default (e.g., "Taylor,John Doe")
+    CORS_ORIGINS: str = "*"               # comma-separated list or "*"
+    EXCLUDE_AGENTS: str = ""              # e.g., "Taylor,John Doe"
+    # If set, restricts results to rows that include at least one of these tags by default
+    DEFAULT_ONLY_TAGS: str = ""           # e.g., "Existing Patient,New Patient"
+
     class Config:
         env_file = ".env"
 
 settings = Settings()
-EXCLUDE_AGENT_LIST = [a.strip() for a in settings.EXCLUDE_AGENTS.split(",") if a.strip()]
+
+EXCLUDE_AGENT_LIST: List[str] = [a.strip() for a in settings.EXCLUDE_AGENTS.split(",") if a.strip()]
+DEFAULT_ONLY_TAGS: List[str] = [t.strip() for t in settings.DEFAULT_ONLY_TAGS.split(",") if t.strip()]
 
 BASE_URL = "https://api.callrail.com/v3"
 USER_AGENT = "CallRail-Metrics-App/1.0 (+fastapi)"
@@ -90,20 +96,33 @@ def format_hms(seconds: Optional[float | int]) -> str:
     m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
-# Build SQL agent filter clause once per request
 def _agent_filter_clause(only_agent: Optional[str]) -> Tuple[str, List[str]]:
     """
-    - If only_agent is provided: include ONLY that agent.
-    - Else: exclude global EXCLUDE_AGENT_LIST from env (if any).
-    Returns (sql_snippet, params_list) that should be appended to WHERE.
+    - If only_agent provided: include ONLY that agent.
+    - Else: exclude EXCLUDE_AGENT_LIST (if any).
+    Returns (sql_snippet, params).
     """
     if only_agent:
         return " AND agent_name = ?", [only_agent]
     if EXCLUDE_AGENT_LIST:
         placeholders = ",".join("?" for _ in EXCLUDE_AGENT_LIST)
-        # Keep rows with NULL agent_name, exclude the listed ones
+        # keep NULL agent rows; exclude listed ones
         return f" AND (agent_name IS NULL OR agent_name NOT IN ({placeholders}))", EXCLUDE_AGENT_LIST
     return "", []
+
+def _tag_filter_clause(only_tags: Optional[List[str]]) -> Tuple[str, List[str]]:
+    """
+    Restrict rows to those containing at least one of the given tags.
+    - If only_tags provided (query override), use it.
+    - Else if DEFAULT_ONLY_TAGS set (env), use that.
+    - Else no tag restriction.
+    Returns (sql_snippet, params).
+    """
+    tags = only_tags if (only_tags and len(only_tags) > 0) else DEFAULT_ONLY_TAGS
+    if not tags:
+        return "", []
+    ors = " OR ".join(["tags LIKE ?"] * len(tags))
+    return f" AND ({ors})", [f"%{t}%" for t in tags]
 
 # =========================
 # CallRail Client
@@ -217,9 +236,15 @@ def upsert_calls(calls: List[Dict[str, Any]]):
     conn.close()
 
 # =========================
-# Aggregations (agent-aware)
+# Aggregations (agent/tag-aware)
 # =========================
-def summarize_totals(conn, start: Optional[str], end: Optional[str], only_agent: Optional[str] = None) -> Dict[str, Any]:
+def summarize_totals(
+    conn,
+    start: Optional[str],
+    end: Optional[str],
+    only_agent: Optional[str] = None,
+    only_tags: Optional[List[str]] = None
+) -> Dict[str, Any]:
     q = f"""
     SELECT
       COUNT(*) AS calls,
@@ -233,13 +258,26 @@ def summarize_totals(conn, start: Optional[str], end: Optional[str], only_agent:
         params = [start, end]
     else:
         q += " WHERE 1=1"
+
     clause, extra = _agent_filter_clause(only_agent)
     q += clause
     params.extend(extra)
+
+    t_clause, t_extra = _tag_filter_clause(only_tags)
+    q += t_clause
+    params.extend(t_extra)
+
     row = conn.execute(q, params).fetchone()
     return dict(row) if row else {"calls": 0, "answered": 0, "avg_duration": 0}
 
-def group_by(conn, field: str, start: Optional[str], end: Optional[str], only_agent: Optional[str] = None) -> List[Dict[str, Any]]:
+def group_by(
+    conn,
+    field: str,
+    start: Optional[str],
+    end: Optional[str],
+    only_agent: Optional[str] = None,
+    only_tags: Optional[List[str]] = None
+) -> List[Dict[str, Any]]:
     q = f"""
     SELECT
       COALESCE({field}, 'Unknown') AS key,
@@ -254,14 +292,26 @@ def group_by(conn, field: str, start: Optional[str], end: Optional[str], only_ag
         params = [start, end]
     else:
         q += " WHERE 1=1"
+
     clause, extra = _agent_filter_clause(only_agent)
     q += clause
     params.extend(extra)
+
+    t_clause, t_extra = _tag_filter_clause(only_tags)
+    q += t_clause
+    params.extend(t_extra)
+
     q += " GROUP BY key ORDER BY calls DESC"
     cur = conn.execute(q, params)
     return rows_to_list(cur.fetchall())
 
-def duration_buckets(conn, start: Optional[str], end: Optional[str], only_agent: Optional[str] = None) -> List[Dict[str, Any]]:
+def duration_buckets(
+    conn,
+    start: Optional[str],
+    end: Optional[str],
+    only_agent: Optional[str] = None,
+    only_tags: Optional[List[str]] = None
+) -> List[Dict[str, Any]]:
     cases = """
     CASE
       WHEN COALESCE(duration_seconds,0) <= 30 THEN '0-30s'
@@ -278,14 +328,26 @@ def duration_buckets(conn, start: Optional[str], end: Optional[str], only_agent:
         params = [start, end]
     else:
         q += " WHERE 1=1"
+
     clause, extra = _agent_filter_clause(only_agent)
     q += clause
     params.extend(extra)
+
+    t_clause, t_extra = _tag_filter_clause(only_tags)
+    q += t_clause
+    params.extend(t_extra)
+
     q += " GROUP BY bucket ORDER BY calls DESC"
     cur = conn.execute(q, params)
     return rows_to_list(cur.fetchall())
 
-def avg_duration_between(conn, start_iso: str, end_iso: str, only_agent: Optional[str] = None) -> Optional[float]:
+def avg_duration_between(
+    conn,
+    start_iso: str,
+    end_iso: str,
+    only_agent: Optional[str] = None,
+    only_tags: Optional[List[str]] = None
+) -> Optional[float]:
     q = f"""
     SELECT AVG(duration_seconds) AS avg_secs
     FROM calls
@@ -293,16 +355,22 @@ def avg_duration_between(conn, start_iso: str, end_iso: str, only_agent: Optiona
       AND {DATE_COL} BETWEEN ? AND ?
     """
     params: List[Any] = [start_iso, end_iso]
+
     clause, extra = _agent_filter_clause(only_agent)
     q += clause
     params.extend(extra)
+
+    t_clause, t_extra = _tag_filter_clause(only_tags)
+    q += t_clause
+    params.extend(t_extra)
+
     row = conn.execute(q, params).fetchone()
     return row["avg_secs"] if row and row["avg_secs"] is not None else None
 
 # =========================
 # FastAPI App + CORS
 # =========================
-app = FastAPI(title="CallRail Metrics", version="1.2.0")
+app = FastAPI(title="CallRail Metrics", version="1.3.0")
 
 origins = (
     [o.strip() for o in settings.CORS_ORIGINS.split(",")]
@@ -327,7 +395,8 @@ def health():
         "ok": True,
         "account_id": settings.CALLRAIL_ACCOUNT_ID,
         "db_path": settings.DB_PATH,
-        "exclude_agents": EXCLUDE_AGENT_LIST
+        "exclude_agents": EXCLUDE_AGENT_LIST,
+        "default_only_tags": DEFAULT_ONLY_TAGS
     }
 
 @app.post("/ingest")
@@ -355,15 +424,19 @@ async def ingest_last_week():
 def metrics_summary(
     start: Optional[dt.date] = Query(None),
     end: Optional[dt.date] = Query(None),
-    only_agent: Optional[str] = Query(None, description="If set, include only this agent (overrides global excludes)")
+    only_agent: Optional[str] = Query(None, description="If set, include only this agent (overrides global excludes)"),
+    only_tags: Optional[str] = Query(None, description="Comma-separated tags to include (overrides DEFAULT_ONLY_TAGS)")
 ):
     s = iso_date(start) if start else None
     e = iso_date(end) if end else None
+    tag_list = [t.strip() for t in only_tags.split(",")] if only_tags else None
+
     conn = get_db()
     try:
-        out = summarize_totals(conn, s, e, only_agent)
+        out = summarize_totals(conn, s, e, only_agent, tag_list)
         out["avg_duration_hms"] = format_hms(out.get("avg_duration"))
         out["agent_filter"] = f"only {only_agent}" if only_agent else (f"excluding {EXCLUDE_AGENT_LIST}" if EXCLUDE_AGENT_LIST else "all agents")
+        out["tag_filter"] = f"only {tag_list}" if tag_list else (f"default {DEFAULT_ONLY_TAGS}" if DEFAULT_ONLY_TAGS else "all tags")
         return out
     finally:
         conn.close()
@@ -372,13 +445,16 @@ def metrics_summary(
 def metrics_by_company(
     start: Optional[dt.date] = Query(None),
     end: Optional[dt.date] = Query(None),
-    only_agent: Optional[str] = Query(None)
+    only_agent: Optional[str] = Query(None),
+    only_tags: Optional[str] = Query(None)
 ):
     s = iso_date(start) if start else None
     e = iso_date(end) if end else None
+    tag_list = [t.strip() for t in only_tags.split(",")] if only_tags else None
+
     conn = get_db()
     try:
-        return group_by(conn, "company_name", s, e, only_agent)
+        return group_by(conn, "company_name", s, e, only_agent, tag_list)
     finally:
         conn.close()
 
@@ -386,13 +462,16 @@ def metrics_by_company(
 def metrics_by_source(
     start: Optional[dt.date] = Query(None),
     end: Optional[dt.date] = Query(None),
-    only_agent: Optional[str] = Query(None)
+    only_agent: Optional[str] = Query(None),
+    only_tags: Optional[str] = Query(None)
 ):
     s = iso_date(start) if start else None
     e = iso_date(end) if end else None
+    tag_list = [t.strip() for t in only_tags.split(",")] if only_tags else None
+
     conn = get_db()
     try:
-        return group_by(conn, "source_name", s, e, only_agent)
+        return group_by(conn, "source_name", s, e, only_agent, tag_list)
     finally:
         conn.close()
 
@@ -400,27 +479,50 @@ def metrics_by_source(
 def metrics_by_tag(
     start: Optional[dt.date] = Query(None),
     end: Optional[dt.date] = Query(None),
-    only_agent: Optional[str] = Query(None)
+    only_agent: Optional[str] = Query(None),
+    only_tags: Optional[str] = Query(None)
 ):
+    """
+    Returns counts of tags among filtered rows.
+    If only_tags is provided (or DEFAULT_ONLY_TAGS set), the result is limited to those tags.
+    """
     s = iso_date(start) if start else None
     e = iso_date(end) if end else None
+    selected_tags = [t.strip() for t in only_tags.split(",")] if only_tags else None
+
     conn = get_db()
     try:
         params: List[Any] = []
         q = "SELECT tags FROM calls WHERE tags IS NOT NULL AND tags <> ''"
         if s and e:
             q += f" AND {DATE_COL} BETWEEN ? AND ?"
-            params = [s, e]
+            params.extend([s, e])
+
+        # agent filter
         clause, extra = _agent_filter_clause(only_agent)
         q += clause
         params.extend(extra)
+
+        # tag filter at row level
+        t_clause, t_extra = _tag_filter_clause(selected_tags)
+        q += t_clause
+        params.extend(t_extra)
+
         rows = [r["tags"] for r in conn.execute(q, params).fetchall()]
         from collections import Counter
         c = Counter()
         for t in rows:
             for tag in [x.strip() for x in t.split(",") if x.strip()]:
                 c[tag] += 1
-        return [{"key": k, "calls": v} for k, v in c.most_common()]
+
+        # If tag filter is active, limit the output to those tags
+        limit_to = selected_tags if (selected_tags and len(selected_tags) > 0) else (DEFAULT_ONLY_TAGS if DEFAULT_ONLY_TAGS else None)
+        if limit_to:
+            items = [(k, c.get(k, 0)) for k in limit_to]
+        else:
+            items = c.most_common()
+
+        return [{"key": k, "calls": v} for k, v in items]
     finally:
         conn.close()
 
@@ -428,13 +530,16 @@ def metrics_by_tag(
 def metrics_duration_buckets(
     start: Optional[dt.date] = Query(None),
     end: Optional[dt.date] = Query(None),
-    only_agent: Optional[str] = Query(None)
+    only_agent: Optional[str] = Query(None),
+    only_tags: Optional[str] = Query(None)
 ):
     s = iso_date(start) if start else None
     e = iso_date(end) if end else None
+    tag_list = [t.strip() for t in only_tags.split(",")] if only_tags else None
+
     conn = get_db()
     try:
-        return duration_buckets(conn, s, e, only_agent)
+        return duration_buckets(conn, s, e, only_agent, tag_list)
     finally:
         conn.close()
 
@@ -443,15 +548,17 @@ def metrics_duration_buckets(
 # =========================
 @app.get("/reports/avg-call-time-last-week")
 def report_avg_call_time_last_week(
-    only_agent: Optional[str] = Query(None, description="If set, include only this agent (overrides global excludes)")
+    only_agent: Optional[str] = Query(None, description="If set, include only this agent (overrides global excludes)"),
+    only_tags: Optional[str] = Query(None, description="Comma-separated tags to include (overrides DEFAULT_ONLY_TAGS)")
 ):
     today = dt.date.today()
     start = today - dt.timedelta(days=6)
     s_iso, e_iso = start.isoformat(), today.isoformat()
+    tag_list = [t.strip() for t in only_tags.split(",")] if only_tags else None
 
     conn = get_db()
     try:
-        avg_secs = avg_duration_between(conn, s_iso, e_iso, only_agent)
+        avg_secs = avg_duration_between(conn, s_iso, e_iso, only_agent, tag_list)
     finally:
         conn.close()
 
@@ -461,11 +568,12 @@ def report_avg_call_time_last_week(
         "average_seconds": round(avg_secs, 2) if avg_secs is not None else 0.0,
         "average_hms": format_hms(avg_secs),
         "note": "Rolling 7-day window including today.",
-        "agent_filter": f"only {only_agent}" if only_agent else (f"excluding {EXCLUDE_AGENT_LIST}" if EXCLUDE_AGENT_LIST else "all agents")
+        "agent_filter": f"only {only_agent}" if only_agent else (f"excluding {EXCLUDE_AGENT_LIST}" if EXCLUDE_AGENT_LIST else "all agents"),
+        "tag_filter": f"only {tag_list}" if tag_list else (f"default {DEFAULT_ONLY_TAGS}" if DEFAULT_ONLY_TAGS else "all tags")
     }
 
 # =========================
-# Debugging helpers (no agent filters here)
+# Debugging helpers (no agent/tag filters here)
 # =========================
 @app.get("/debug/db-stats")
 def debug_db_stats():
