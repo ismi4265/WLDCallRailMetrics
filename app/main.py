@@ -1,11 +1,15 @@
+# at top of main.py
+from dotenv import load_dotenv; load_dotenv()
+
 import os
 import asyncio
 import datetime as dt
 from typing import Dict, Any, List, Optional, Tuple
 
+
 import httpx
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings
 import sqlite3
 
 # =========================
