@@ -22,17 +22,11 @@ A FastAPI application to ingest call data from the [CallRail API](https://apidoc
 WLDCallRailMetrics/
 
 ├── app/
-
 │ └── main.py # FastAPI app
-
 ├── requirements.txt
-
 ├── Dockerfile
-
 ├── .github/workflows/ci.yml
-
 ├── .env.example
-
 └── README.md
 
 bash
