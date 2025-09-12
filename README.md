@@ -21,3 +21,9 @@ FastAPI microservice to ingest CallRail call data and expose simple metrics.
 ```bash
 git clone https://github.com/ismi4265/WLDCallRailMetrics.git
 cd WLDCallRailMetrics
+
+## Docker
+
+### Build locally
+```bash
+docker build -t wld-callrail:dev .

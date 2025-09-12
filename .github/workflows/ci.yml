@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    env:
+      CALLRAIL_API_KEY: "dummy"
+      CALLRAIL_ACCOUNT_ID: "123456789"
+      CORS_ORIGINS: "*"
+      DB_PATH: "callrail_metrics.db"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Start API (background)
+        run: |
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+          sleep 2
+
+      - name: Health check
+        run: curl -sSf http://127.0.0.1:8000/health
