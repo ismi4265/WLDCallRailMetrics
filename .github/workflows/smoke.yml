@@ -1,0 +1,74 @@
+name: Smoke Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      DB_PATH: ./data/ci.sqlite3
+      PYTHONUNBUFFERED: "1"
+      # Safe dummy defaults so the app can import without real secrets
+      CALLRAIL_API_KEY: dummy
+      CALLRAIL_ACCOUNT_ID: acct_dummy
+      CORS_ORIGINS: "*"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            # Fallback in case requirements.txt is missing
+            pip install fastapi "uvicorn[standard]" pydantic-settings
+          fi
+
+      - name: Prepare runtime dirs
+        run: mkdir -p "$(dirname "$DB_PATH")"
+
+      - name: Launch server
+        run: |
+          # Start uvicorn in background and capture PID & logs
+          python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level warning > uvicorn.log 2>&1 &
+          echo $! > uvicorn.pid
+
+      - name: Wait for server to be ready
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/health > /dev/null; then
+              echo "Server is up."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server failed to start. Dumping last 200 lines of uvicorn.log:"
+          tail -n 200 uvicorn.log || true
+          exit 1
+
+      - name: Smoke check /health
+        run: |
+          curl -sSf http://127.0.0.1:8000/health
+          echo
+
+      - name: Tear down server
+        if: always()
+        run: |
+          if [ -f uvicorn.pid ]; then
+            kill "$(cat uvicorn.pid)" || true
+          fi
+          sleep 1
+          pkill -f "uvicorn app.main:app" || true
+          echo "Server stopped."
